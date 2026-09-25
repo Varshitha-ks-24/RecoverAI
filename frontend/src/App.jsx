@@ -50,7 +50,7 @@ function App() {
     <DatasetProvider>
       <div className="min-h-screen bg-dark-bg flex">
         <Sidebar />
-        <main className="flex-1 min-w-0 ml-0 lg:ml-72 transition-all duration-300 min-h-screen">
+        <main className="flex-1 min-w-0 ml-72 transition-all duration-300 min-h-screen">
           <div className="p-4 sm:p-6 lg:p-8 min-w-0">
             <Routes>
               <Route path="/" element={<Dashboard />} />

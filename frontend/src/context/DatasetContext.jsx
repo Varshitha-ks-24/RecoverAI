@@ -71,6 +71,27 @@ export function DatasetProvider({ children }) {
     }
   }, [fetchDatasets])
 
+  const uploadDatasetBatch = useCallback(async (files, name, description, source) => {
+    try {
+      setLoading(true)
+      const formData = new FormData()
+      files.forEach((file) => formData.append('files', file, file.name))
+      formData.append('name', name)
+      formData.append('description', description)
+      formData.append('source', source)
+      const response = await api.post('/datasets/upload-batch', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+      await fetchDatasets()
+      return response.data
+    } catch (err) {
+      setError(err.message)
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }, [fetchDatasets])
+
   const clearCurrentDataset = useCallback(() => {
     setCurrentDataset(null)
   }, [])
@@ -84,6 +105,7 @@ export function DatasetProvider({ children }) {
     loadDataset,
     createDemoDataset,
     uploadDataset,
+    uploadDatasetBatch,
     clearCurrentDataset,
   }
 

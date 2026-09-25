@@ -328,6 +328,47 @@ The project is therefore self-contained for local development: the only network 
     - An investigator can accept, reject, override, or flag results.
     - Each action creates an audit entry.
 
+## Implemented AI Pipeline
+
+The production analysis path is implemented in `backend/app/services/ai_pipeline.py` and is used by both synthetic demo generation and uploaded-file processing.
+
+```text
+Disk/Image
+   -> Fragment Extraction
+   -> Feature Extraction
+   -> Random Forest Classification
+   -> Isolation Forest Anomaly Detection
+   -> SHA-256 Hash and Similarity Analysis
+   -> Relationship Correlation and Reconstruction
+   -> Confidence and anomaly scores
+   -> Investigator Dashboard
+```
+
+### Random Forest classification
+
+`FragmentClassifier` in `fragment_analyzer.py` trains a scikit-learn `RandomForestClassifier` on a deterministic labelled corpus of file-signature and content-pattern examples. The feature vector includes fragment size, entropy, printable ratio, null/high-byte ratios, byte-frequency distribution, signature markers, document markers, and encryption hints. Each fragment receives a predicted file type, confidence score, class probabilities, and `classification_method: random_forest`.
+
+### Isolation Forest anomaly detection
+
+`FragmentAIPipeline` fits an `IsolationForest` over the complete fragment batch. It stores a normalized `anomaly_score`, an `anomaly_label`, and the model execution flag under `features.ai_analysis`. High-scoring fragments also receive an `isolation_forest_anomaly` suspicious indicator for investigator review. Anomaly flags are recommendations only; they do not change investigator decisions.
+
+### Hash and similarity analysis
+
+- SHA-256 is generated for every fragment.
+- Exact duplicate groups are identified by matching hashes.
+- Expected hashes, when supplied by a dataset, are compared and reported as verified, mismatch, or unverified.
+- Existing relationship analysis compares signature compatibility, structural consistency, metadata, and byte-frequency cosine similarity.
+- Dashboard statistics expose duplicate groups and strong content-similarity groups.
+- Reconstruction overlap information is retained in `confidence_breakdown.overlaps_with` so conflicting candidates remain visible.
+
+### Investigator separation
+
+AI fields such as classification, confidence, anomaly scores, hash status, and relationship scores are recommendations and evidence metadata. Investigator actions such as accepting, rejecting, overriding, or flagging results continue to use the existing API endpoints and are recorded separately in `AuditLog`.
+
+### Optional explanation layer
+
+No external LLM service is enabled by default. This keeps the application local and prevents unsupported conclusions from being generated. The structured model probabilities, anomaly indicators, relationship details, hash status, and confidence breakdown provide grounded evidence for an eventual explanation layer without inventing findings.
+
 ## Data Model
 
 ### Dataset
@@ -414,6 +455,26 @@ npm run build
 ```
 
 The production output is written to `frontend/dist/`.
+
+### Test the AI pipeline
+
+From the repository root, install backend dependencies and run the focused tests:
+
+```bash
+cd backend
+python3 -m pytest tests/test_ai_pipeline.py -q
+```
+
+To exercise the real pipeline through the API and regenerate the synthetic dataset:
+
+```bash
+cd backend
+python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+curl -X POST http://127.0.0.1:8000/api/datasets/demo
+curl http://127.0.0.1:8000/api/dashboard/stats
+```
+
+The dashboard response includes Random Forest method counts, Isolation Forest anomaly counts and average score, duplicate groups, similarity groups, and hash status counts.
 
 ## Typical Demo Walkthrough
 

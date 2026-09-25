@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import React, { useEffect, useState, useMemo } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { 
   ArrowLeft, 
@@ -286,6 +286,12 @@ export function Fragments() {
 
   const fileTypes = useMemo(() => [...new Set(fragments.map(f => f.file_type))].sort(), [fragments])
 
+  const typeCounts = useMemo(() => {
+    const counts = {}
+    fragments.forEach(f => { counts[f.file_type] = (counts[f.file_type] || 0) + 1 })
+    return counts
+  }, [fragments])
+
   const toggleRow = (fragmentId) => {
     setExpandedRows(prev => {
       const next = new Set(prev)
@@ -344,12 +350,6 @@ export function Fragments() {
       </div>
     )
   }
-
-  const typeCounts = useMemo(() => {
-    const counts = {}
-    fragments.forEach(f => { counts[f.file_type] = (counts[f.file_type] || 0) + 1 })
-    return counts
-  }, [fragments])
 
   return (
     <div className="page-enter animate-fade-in space-y-6">

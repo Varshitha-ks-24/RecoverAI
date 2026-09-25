@@ -9,6 +9,7 @@ from datetime import datetime
 from app.core.database import get_db
 from app.models import Dataset, Fragment, FragmentRelationship, Reconstruction, ReconstructionFragment, AuditLog
 from app.services.fragment_analyzer import analyze_fragment, FragmentClassifier, find_duplicates
+from app.services.ai_pipeline import FragmentAIPipeline, duplicate_groups, similarity_groups
 from app.services.relationship_analyzer import analyze_relationship, build_relationship_graph, find_reconstruction_chains
 from app.services.reconstruction_engine import generate_reconstructions, check_overlapping_candidates
 from app.services.demo_data_generator import generate_demo_dataset
@@ -19,6 +20,7 @@ UPLOAD_DIR = "./uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 classifier = FragmentClassifier()
+ai_pipeline = FragmentAIPipeline(classifier)
 
 
 @router.post("/datasets/upload")
@@ -41,6 +43,53 @@ async def upload_dataset(
     background_tasks.add_task(process_dataset, dataset.id, file_path)
     
     return {"dataset_id": dataset.id, "status": "processing", "message": "Dataset uploaded, processing started"}
+
+
+@router.post("/datasets/upload-batch")
+async def upload_dataset_batch(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    name: str = Form(...),
+    description: str = Form(""),
+    source: str = Form("Manual Upload"),
+    db: Session = Depends(get_db),
+):
+    """Create one investigation from investigator-selected files only."""
+    if not files:
+        raise HTTPException(400, "Select at least one evidence file")
+
+    batch_dir = os.path.join(UPLOAD_DIR, f"batch_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}")
+    os.makedirs(batch_dir, exist_ok=True)
+    file_paths = []
+    for index, upload in enumerate(files):
+        filename = os.path.basename(upload.filename or f"evidence_{index}")
+        if not filename:
+            continue
+        file_path = os.path.join(batch_dir, f"{index:04d}_{filename}")
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(upload.file, buffer)
+        file_paths.append((file_path, upload.filename or filename))
+
+    if not file_paths:
+        raise HTTPException(400, "No readable evidence files were selected")
+
+    dataset = Dataset(
+        name=name,
+        description=description,
+        file_path=batch_dir,
+        status="processing",
+    )
+    db.add(dataset)
+    db.commit()
+    db.refresh(dataset)
+    background_tasks.add_task(process_dataset_files, dataset.id, file_paths)
+    return {
+        "dataset_id": dataset.id,
+        "status": "processing",
+        "source": source,
+        "files": len(file_paths),
+        "message": "Selected evidence accepted, processing started",
+    }
 
 
 @router.post("/datasets/demo")
@@ -90,7 +139,7 @@ async def load_demo_dataset(
             classification_method=frag_data["classification_method"],
             features=frag_data["features"],
             suspicious_indicators=frag_data.get("suspicious_indicators", []),
-            status="analyzed" if not frag_data.get("is_decoy") else "suspicious",
+            status="suspicious" if frag_data.get("is_decoy") or frag_data.get("anomaly_label") == "anomaly" else "analyzed",
         )
         db.add(fragment)
     
@@ -134,7 +183,10 @@ async def load_demo_dataset(
             fragment_count=recon_data["fragment_count"],
             missing_fragments=recon_data["missing_fragments"],
             confidence_score=recon_data["confidence_score"],
-            confidence_breakdown=recon_data["confidence_breakdown"],
+            confidence_breakdown={
+                **recon_data["confidence_breakdown"],
+                "overlaps_with": recon_data.get("overlaps_with", []),
+            },
             integrity_status=recon_data["integrity_status"],
             integrity_hash=recon_data["integrity_hash"],
             expected_hash=recon_data.get("expected_hash"),
@@ -459,6 +511,19 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     duplicates = sum(1 for f in fragments if f.is_duplicate)
     suspicious = sum(1 for f in fragments if f.status == "suspicious")
     corrupted = sum(1 for f in fragments if f.suspicious_indicators and any(i.get("type") in ["high_entropy", "magic_mismatch"] for i in f.suspicious_indicators))
+    fragment_dicts = [frag_to_dict(f) for f in fragments]
+    anomalies = sum(1 for f in fragment_dicts if f.get("anomaly_label") == "anomaly")
+    anomaly_scores = [f["anomaly_score"] for f in fragment_dicts if f.get("anomaly_score") is not None]
+    duplicate_group_list = duplicate_groups(fragment_dicts)
+    similarity_group_list = similarity_groups(fragment_dicts)
+    classification_methods = {}
+    for fragment in fragment_dicts:
+        method = fragment.get("classification_method", "unknown")
+        classification_methods[method] = classification_methods.get(method, 0) + 1
+    hash_status_counts = {"verified": 0, "mismatch": 0, "unverified": 0}
+    for fragment in fragment_dicts:
+        status = fragment.get("hash_analysis", {}).get("status", "unverified")
+        hash_status_counts[status] = hash_status_counts.get(status, 0) + 1
     
     return {
         "total_datasets": total_datasets,
@@ -470,10 +535,19 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         "duplicates": duplicates,
         "suspicious_fragments": suspicious,
         "corrupted_fragments": corrupted,
+        "anomalies": anomalies,
+        "average_anomaly_score": round(sum(anomaly_scores) / len(anomaly_scores), 4) if anomaly_scores else 0,
+        "duplicate_groups": duplicate_group_list,
+        "similarity_groups": similarity_group_list,
+        "classification_methods": classification_methods,
+        "hash_status_counts": hash_status_counts,
     }
 
 
 def frag_to_dict(f: Fragment) -> Dict:
+    features = f.features or {}
+    ai_analysis = features.get("ai_analysis", {})
+    hash_analysis = features.get("hash_analysis", {})
     return {
         "id": f.id,
         "fragment_id": f.fragment_id,
@@ -489,7 +563,11 @@ def frag_to_dict(f: Fragment) -> Dict:
         "duplicate_of": f.duplicate_of,
         "classification_confidence": f.classification_confidence,
         "classification_method": f.classification_method,
-        "features": f.features,
+        "features": features,
+        "ai_analysis": ai_analysis,
+        "anomaly_score": ai_analysis.get("anomaly_score"),
+        "anomaly_label": ai_analysis.get("anomaly_label"),
+        "hash_analysis": hash_analysis,
         "suspicious_indicators": f.suspicious_indicators,
         "status": f.status,
         "created_at": f.created_at.isoformat() if f.created_at else None,
@@ -539,15 +617,14 @@ async def process_dataset(dataset_id: int, file_path: str):
             data = f.read()
         
         chunk_size = 1024 * 512
-        fragments_data = []
+        fragments_input = []
         for i in range(0, len(data), chunk_size):
             chunk = data[i:i+chunk_size]
             fid = f"chunk_{i//chunk_size:04d}"
-            result = analyze_fragment(fid, chunk, classifier)
-            result["original_offset"] = i
-            fragments_data.append(result)
-        
-        fragments_data = find_duplicates(fragments_data)
+            fragments_input.append((fid, chunk, {"original_offset": i}))
+        fragments_data = ai_pipeline.analyze_batch(fragments_input)
+        for index, frag_data in enumerate(fragments_data):
+            frag_data["original_offset"] = index * chunk_size
         
         for frag_data in fragments_data:
             fragment = Fragment(
@@ -567,7 +644,7 @@ async def process_dataset(dataset_id: int, file_path: str):
                 classification_method=frag_data["classification_method"],
                 features=frag_data["features"],
                 suspicious_indicators=frag_data.get("suspicious_indicators", []),
-                status="analyzed",
+                status="suspicious" if frag_data.get("anomaly_label") == "anomaly" else "analyzed",
             )
             db.add(fragment)
         
@@ -610,7 +687,10 @@ async def process_dataset(dataset_id: int, file_path: str):
                 fragment_count=recon_data["fragment_count"],
                 missing_fragments=recon_data["missing_fragments"],
                 confidence_score=recon_data["confidence_score"],
-                confidence_breakdown=recon_data["confidence_breakdown"],
+                confidence_breakdown={
+                    **recon_data["confidence_breakdown"],
+                    "overlaps_with": recon_data.get("overlaps_with", []),
+                },
                 integrity_status=recon_data["integrity_status"],
                 integrity_hash=recon_data["integrity_hash"],
                 expected_hash=recon_data.get("expected_hash"),
@@ -661,5 +741,129 @@ async def process_dataset(dataset_id: int, file_path: str):
             dataset.status = "failed"
             db.commit()
         print(f"Error processing dataset: {e}")
+    finally:
+        db.close()
+
+
+async def process_dataset_files(dataset_id: int, file_paths: List[tuple[str, str]]):
+    """Process investigator-selected files through the same forensic pipeline."""
+    from app.core.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        fragments_input = []
+        fragment_data_map = {}
+        chunk_size = 1024 * 512
+        for file_index, (file_path, original_name) in enumerate(file_paths):
+            with open(file_path, "rb") as evidence_file:
+                data = evidence_file.read()
+            if not data:
+                continue
+            for offset in range(0, len(data), chunk_size):
+                chunk = data[offset:offset + chunk_size]
+                fragment_id = f"file_{file_index:04d}_{offset // chunk_size:04d}"
+                fragments_input.append((fragment_id, chunk, {
+                    "original_offset": offset,
+                    "source_file": original_name,
+                }))
+                fragment_data_map[fragment_id] = chunk
+
+        if not fragments_input:
+            raise ValueError("Selected evidence files are empty")
+
+        fragments_data = ai_pipeline.analyze_batch(fragments_input)
+        for fragment_data in fragments_data:
+            metadata = fragment_data.get("source_metadata", {})
+            fragment_data["original_offset"] = metadata.get("original_offset")
+            fragment_data["source_file"] = metadata.get("source_file")
+
+        for fragment_data in fragments_data:
+            fragment = Fragment(
+                dataset_id=dataset_id,
+                fragment_id=fragment_data["fragment_id"],
+                original_offset=fragment_data.get("original_offset"),
+                size=fragment_data["size"],
+                file_type=fragment_data["file_type"],
+                mime_type=None,
+                entropy=fragment_data["entropy"],
+                printable_ratio=fragment_data["printable_ratio"],
+                magic_bytes=fragment_data["magic_bytes"],
+                sha256_hash=fragment_data["sha256_hash"],
+                is_duplicate=fragment_data.get("is_duplicate", False),
+                duplicate_of=fragment_data.get("duplicate_of"),
+                classification_confidence=fragment_data["classification_confidence"],
+                classification_method=fragment_data["classification_method"],
+                features={**fragment_data["features"], "source_file": fragment_data.get("source_file")},
+                suspicious_indicators=fragment_data.get("suspicious_indicators", []),
+                status="suspicious" if fragment_data.get("anomaly_label") == "anomaly" else "analyzed",
+            )
+            db.add(fragment)
+        db.commit()
+
+        fragments = db.query(Fragment).filter(Fragment.dataset_id == dataset_id).all()
+        fragment_dicts = [frag_to_dict(fragment) for fragment in fragments]
+        for first_index in range(len(fragment_dicts)):
+            for second_index in range(first_index + 1, len(fragment_dicts)):
+                relationship = analyze_relationship(fragment_dicts[first_index], fragment_dicts[second_index])
+                if relationship["score"] >= 0.3:
+                    db.add(FragmentRelationship(
+                        fragment_a_id=fragment_dicts[first_index]["id"],
+                        fragment_b_id=fragment_dicts[second_index]["id"],
+                        relationship_type=relationship["relationship_type"],
+                        score=relationship["score"],
+                        details=relationship["details"],
+                    ))
+        db.commit()
+
+        reconstructions = check_overlapping_candidates(generate_reconstructions(fragment_dicts, fragment_data_map))
+        for reconstruction_data in reconstructions:
+            reconstruction = Reconstruction(
+                dataset_id=dataset_id,
+                name=reconstruction_data["name"],
+                file_type=reconstruction_data["file_type"],
+                estimated_size=reconstruction_data["estimated_size"],
+                actual_size=reconstruction_data["actual_size"],
+                fragment_count=reconstruction_data["fragment_count"],
+                missing_fragments=reconstruction_data["missing_fragments"],
+                confidence_score=reconstruction_data["confidence_score"],
+                confidence_breakdown={**reconstruction_data["confidence_breakdown"], "overlaps_with": reconstruction_data.get("overlaps_with", [])},
+                integrity_status=reconstruction_data["integrity_status"],
+                integrity_hash=reconstruction_data["integrity_hash"],
+                expected_hash=reconstruction_data.get("expected_hash"),
+                status=reconstruction_data["status"],
+            )
+            db.add(reconstruction)
+            db.flush()
+            for sequence_order, fragment_info in enumerate(reconstruction_data["fragments"]):
+                if fragment_info.get("is_missing"):
+                    continue
+                fragment = db.query(Fragment).filter(Fragment.fragment_id == fragment_info["fragment_id"]).first()
+                if fragment:
+                    db.add(ReconstructionFragment(
+                        reconstruction_id=reconstruction.id,
+                        fragment_id=fragment.id,
+                        sequence_order=sequence_order,
+                        is_missing=False,
+                        confidence=fragment_info.get("classification_confidence"),
+                    ))
+            db.add(AuditLog(
+                dataset_id=dataset_id,
+                reconstruction_id=reconstruction.id,
+                action="reconstructed",
+                new_status="candidate",
+                details={"confidence": reconstruction_data["confidence_score"], "fragments": reconstruction_data["fragment_count"]},
+                hash_value=reconstruction_data["integrity_hash"],
+            ))
+
+        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        dataset.total_fragments = len(fragments_data)
+        dataset.status = "completed"
+        db.commit()
+    except Exception as error:
+        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if dataset:
+            dataset.status = "failed"
+            db.commit()
+        print(f"Error processing selected evidence: {error}")
     finally:
         db.close()

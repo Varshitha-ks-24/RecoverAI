@@ -76,6 +76,11 @@ def extract_features(data: bytes) -> Dict[str, Any]:
     
     features["null_byte_ratio"] = data.count(0) / len(data) if data else 0
     features["high_byte_ratio"] = sum(1 for b in data if b > 127) / len(data) if data else 0
+    features["docx_marker"] = float(b"[Content_Types].xml" in data[:4096] or b"word/" in data[:4096])
+    features["html_marker"] = float(b"<html" in data[:4096].lower() or b"<!doctype html" in data[:4096].lower())
+    features["pdf_marker"] = float(data.startswith(b"%PDF"))
+    features["zip_marker"] = float(data.startswith(b"PK"))
+    features["encrypted_hint"] = float(features["entropy"] > 7.5 and features["printable_ratio"] < 0.3)
     
     return features
 
@@ -118,7 +123,8 @@ class FragmentClassifier:
         self.label_encoder = None
         self.is_trained = False
         self.feature_names = [
-            "size", "entropy", "printable_ratio", "null_byte_ratio", "high_byte_ratio"
+            "size", "entropy", "printable_ratio", "null_byte_ratio", "high_byte_ratio",
+            "docx_marker", "html_marker", "pdf_marker", "zip_marker", "encrypted_hint"
         ] + [f"byte_freq_{i}" for i in range(256)]
     
     def prepare_features(self, features_list: List[Dict]) -> np.ndarray:
@@ -130,6 +136,11 @@ class FragmentClassifier:
                 f.get("printable_ratio", 0),
                 f.get("null_byte_ratio", 0),
                 f.get("high_byte_ratio", 0),
+                f.get("docx_marker", 0),
+                f.get("html_marker", 0),
+                f.get("pdf_marker", 0),
+                f.get("zip_marker", 0),
+                f.get("encrypted_hint", 0),
             ]
             byte_freq = f.get("byte_frequency", [0]*256)
             row.extend(byte_freq[:256])
@@ -140,7 +151,6 @@ class FragmentClassifier:
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.preprocessing import StandardScaler, LabelEncoder
         from sklearn.model_selection import train_test_split
-        from sklearn.metrics import classification_report
         
         X = self.prepare_features(features_list)
         y = np.array(labels)
@@ -158,14 +168,41 @@ class FragmentClassifier:
         self.model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
         self.model.fit(X_train, y_train)
         
-        y_pred = self.model.predict(X_test)
-        print(classification_report(y_test, y_pred, target_names=self.label_encoder.classes_))
-        
         self.is_trained = True
+
+    def _build_training_set(self) -> Tuple[List[Dict], List[str]]:
+        """Create a deterministic labelled corpus from file signatures and content traits."""
+        rng = np.random.default_rng(42)
+        examples: List[Dict] = []
+        labels: List[str] = []
+        prototypes = {
+            "JPEG": b"\xff\xd8\xff" + b"JFIF" + b"\x00" * 300,
+            "PNG": b"\x89PNG\r\n\x1a\n" + b"IHDR" + b"\x00" * 300,
+            "PDF": b"%PDF-1.7\n" + b"PDF object content " * 25,
+            "DOCX": b"PK\x03\x04[Content_Types].xml word/document.xml" + b"\x00" * 250,
+            "ZIP": b"PK\x03\x04archive.bin" + b"\x00" * 300,
+            "TXT": b"Plain text forensic fragment with readable content.\n" * 8,
+            "HTML": b"<!doctype html><html><body>document</body></html>" * 8,
+            "ENCRYPTED": bytes(rng.integers(0, 256, 400, dtype=np.uint8)),
+            "UNKNOWN": bytes(rng.integers(0, 256, 180, dtype=np.uint8)),
+        }
+        for label, prototype in prototypes.items():
+            for _ in range(32):
+                sample = bytearray(prototype)
+                mutation_count = max(1, len(sample) // 80)
+                for position in rng.integers(0, len(sample), mutation_count):
+                    sample[int(position)] = int(rng.integers(0, 256))
+                examples.append(extract_features(bytes(sample)))
+                labels.append(label)
+        return examples, labels
+
+    def ensure_trained(self) -> None:
+        if not self.is_trained:
+            features, labels = self._build_training_set()
+            self.train(features, labels)
     
     def predict(self, features: Dict) -> Tuple[str, float, Dict]:
-        if not self.is_trained or self.model is None:
-            return heuristic_classify(b"")
+        self.ensure_trained()
         
         X = self.prepare_features([features])
         X_scaled = self.scaler.transform(X)
@@ -175,7 +212,11 @@ class FragmentClassifier:
         confidence = float(probas[pred_idx])
         predicted_label = self.label_encoder.inverse_transform([pred_idx])[0]
         
-        return predicted_label, confidence, {"method": "ml", "probabilities": dict(zip(self.label_encoder.classes_, probas.tolist()))}
+        return predicted_label, confidence, {
+            "method": "random_forest",
+            "model_executed": True,
+            "probabilities": dict(zip(self.label_encoder.classes_, probas.tolist())),
+        }
     
     def save(self, path: str):
         import joblib
@@ -199,7 +240,7 @@ def analyze_fragment(fragment_id: str, data: bytes, classifier: Optional[Fragmen
     sha256_hash = hashlib.sha256(data).hexdigest()
     features = extract_features(data)
     
-    if classifier and classifier.is_trained:
+    if classifier:
         file_type, confidence, classification_info = classifier.predict(features)
     else:
         file_type, confidence, classification_info = heuristic_classify(data)

@@ -2,7 +2,7 @@ import hashlib
 import os
 import random
 from typing import Dict, List, Tuple, Any
-from app.services.fragment_analyzer import analyze_fragment, FragmentClassifier, extract_features
+from app.services.ai_pipeline import FragmentAIPipeline
 
 
 JPEG_HEADER = bytes.fromhex("FF D8 FF E0 00 10 4A 46 49 46 00 01")
@@ -233,15 +233,10 @@ def generate_demo_dataset() -> Dict[str, Any]:
     
     random.shuffle(all_fragments)
     
-    classifier = FragmentClassifier()
-    analyzed = []
-    
-    for fid, data, meta in all_fragments:
-        result = analyze_fragment(fid, data, classifier)
-        result.update(meta)
-        analyzed.append(result)
-    
-    analyzed = find_duplicates(analyzed)
+    pipeline = FragmentAIPipeline()
+    analyzed = pipeline.analyze_batch([(fid, data, meta) for fid, data, meta in all_fragments])
+    for result in analyzed:
+        result.update(result.pop("source_metadata", {}))
     
     return {
         "name": "Demo Dataset - Mixed Forensic Fragments",
@@ -250,21 +245,6 @@ def generate_demo_dataset() -> Dict[str, Any]:
         "fragment_data_map": fragment_data_map,
         "fragment_meta": fragment_meta,
     }
-
-
-def find_duplicates(fragments: List[Dict]) -> List[Dict]:
-    hash_map = {}
-    for frag in fragments:
-        h = frag["sha256_hash"]
-        if h in hash_map:
-            frag["is_duplicate"] = True
-            frag["duplicate_of"] = hash_map[h]["fragment_id"]
-            hash_map[h]["duplicates"].append(frag["fragment_id"])
-        else:
-            frag["is_duplicate"] = False
-            frag["duplicate_of"] = None
-            hash_map[h] = {"fragment_id": frag["fragment_id"], "duplicates": []}
-    return fragments
 
 
 if __name__ == "__main__":

@@ -281,30 +281,30 @@ export function DatasetAnalysis() {
 
   return (
     <div className="page-enter animate-fade-in space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+        <div className="flex items-start gap-4 min-w-0 lg:flex-1">
           <button onClick={() => navigate('/')} className="btn btn-secondary p-2">
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div className="flex-1 min-w-0">
             <h1 className="font-display font-bold text-2xl text-[var(--text-primary)] truncate">{dataset.name}</h1>
-            <p className="text-[var(--text-muted)] mt-1">{dataset.description || 'No description provided'}</p>
+            <p className="text-[var(--text-muted)] mt-1 break-words">{dataset.description || 'No description provided'}</p>
           </div>
         </div>
-        <div className="flex flex-wrap gap-3">
-          <Link to={`/fragments/${id}`} className="btn btn-secondary group">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full lg:w-[32rem] shrink-0">
+          <Link to={`/fragments/${id}`} className="btn btn-secondary group min-w-0 whitespace-nowrap">
             <FileText className="w-4 h-4 mr-2" /> Fragments
           </Link>
-          <Link to={`/reconstructions/${id}`} className="btn btn-primary group">
+          <Link to={`/reconstructions/${id}`} className="btn btn-primary group min-w-0 whitespace-nowrap">
             <Puzzle className="w-4 h-4 mr-2" /> Reconstructions
           </Link>
-          <Link to={`/graph/${id}`} className="btn btn-secondary group">
+          <Link to={`/graph/${id}`} className="btn btn-secondary group min-w-0 whitespace-nowrap">
             <GitBranch className="w-4 h-4 mr-2" /> Evidence Graph
           </Link>
-          <Link to={`/audit/${id}`} className="btn btn-secondary group">
+          <Link to={`/audit/${id}`} className="btn btn-secondary group min-w-0 whitespace-nowrap">
             <ListChecks className="w-4 h-4 mr-2" /> Audit Log
           </Link>
-          <button onClick={handleDelete} className="btn btn-danger group">
+          <button onClick={handleDelete} className="btn btn-danger group min-w-0 whitespace-nowrap">
             <Trash2 className="w-4 h-4 mr-2" /> Delete
           </button>
         </div>
@@ -477,19 +477,19 @@ export function DatasetAnalysis() {
               </h3>
             </div>
             <div className="space-y-2">
-              <Link to={`/fragments/${id}`} className="btn btn-secondary w-full justify-start group">
+              <Link to={`/fragments/${id}`} className="btn btn-secondary inline-flex items-center w-full min-h-11 justify-start group whitespace-nowrap">
                 <FileText className="w-4 h-4 mr-2" />
                 <span>Analyze Fragments</span>
               </Link>
-              <Link to={`/reconstructions/${id}`} className="btn btn-primary w-full justify-start group">
+              <Link to={`/reconstructions/${id}`} className="btn btn-primary inline-flex items-center w-full min-h-11 justify-start group whitespace-nowrap">
                 <Puzzle className="w-4 h-4 mr-2" />
                 <span>Review Reconstructions</span>
               </Link>
-              <Link to={`/graph/${id}`} className="btn btn-secondary w-full justify-start group">
+              <Link to={`/graph/${id}`} className="btn btn-secondary inline-flex items-center w-full min-h-11 justify-start group whitespace-nowrap">
                 <GitBranch className="w-4 h-4 mr-2" />
                 <span>View Evidence Graph</span>
               </Link>
-              <Link to={`/audit/${id}`} className="btn btn-secondary w-full justify-start group">
+              <Link to={`/audit/${id}`} className="btn btn-secondary inline-flex items-center w-full min-h-11 justify-start group whitespace-nowrap">
                 <ListChecks className="w-4 h-4 mr-2" />
                 <span>View Audit Log</span>
               </Link>

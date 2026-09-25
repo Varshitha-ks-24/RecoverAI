@@ -31,6 +31,7 @@ import {
   Clock,
   Sparkles
 } from 'lucide-react'
+import { clsx } from 'clsx'
 
 const features = [
   {
